@@ -110,10 +110,14 @@ function unhtml(value) {
     .replaceAll("&amp;", "&");
 }
 
-function telegramHtmlToDiscord(text) {
+function telegramHtmlToDiscord(text, chain = null) {
   return unhtml(text)
     .replace(/<b>(.*?)<\/b>/gs, "**$1**")
-    .replace(/<code>(.*?)<\/code>/gs, "`$1`")
+    .replace(/<code>(.*?)<\/code>/gs, (_match, value) => {
+      const clean = value.trim();
+      if (chain && isAddress(clean)) return `[${short(clean)}](${chain.explorerAddress}${clean})`;
+      return `\`${clean}\``;
+    })
     .replace(/<a href="([^"]+)">(.*?)<\/a>/gs, "$2 <$1>")
     .replace(/<[^>]+>/g, "");
 }
@@ -287,7 +291,8 @@ async function sendMessage(chatId, text, options = {}) {
 
 async function sendDiscordMessage(text) {
   if (!config.discordWebhookUrl) return;
-  const discordText = telegramHtmlToDiscord(text);
+  const chain = chainFromAlertText(text);
+  const discordText = telegramHtmlToDiscord(text, chain);
   const chunks = chunkText(discordText, 1900);
   for (const chunk of chunks) {
     const res = await fetch(config.discordWebhookUrl, {
@@ -304,6 +309,11 @@ async function sendDiscordMessage(text) {
       throw new Error(`discord webhook ${res.status}: ${body || res.statusText}`);
     }
   }
+}
+
+function chainFromAlertText(text) {
+  const firstLine = unhtml(text.split("\n")[0] || "").replace(/<[^>]+>/g, "");
+  return chains.find((chain) => firstLine.includes(chain.name)) || null;
 }
 
 function chunkText(text, limit) {
