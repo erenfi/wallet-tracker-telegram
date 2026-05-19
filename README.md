@@ -62,6 +62,18 @@ MIN_NATIVE_OUTGOING_ALERT=0
 With that setting, inbound transfers below `0.001 ETH` are skipped, while
 outgoing ETH transfers and marketplace token/NFT alerts still post.
 
+## Discord Rate Limits
+
+Discord webhook delivery is queued. These settings control burst behavior:
+
+```env
+DISCORD_MIN_SEND_INTERVAL_MS=1200
+DISCORD_MAX_QUEUE_SIZE=250
+```
+
+If Discord returns `429`, the bot honors `retry_after` and retries instead of
+dropping the alert immediately.
+
 ## Run In Background
 
 ```bash

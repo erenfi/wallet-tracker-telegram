@@ -43,8 +43,14 @@ const config = {
   confirmations: Number.parseInt(process.env.CONFIRMATIONS || "1", 10),
   minNativeIncomingWei: parseDecimalUnits(process.env.MIN_NATIVE_INCOMING_ALERT || "0", 18),
   minNativeOutgoingWei: parseDecimalUnits(process.env.MIN_NATIVE_OUTGOING_ALERT || "0", 18),
+  discordMinSendIntervalMs: Number.parseInt(process.env.DISCORD_MIN_SEND_INTERVAL_MS || "1200", 10),
+  discordMaxQueueSize: Number.parseInt(process.env.DISCORD_MAX_QUEUE_SIZE || "250", 10),
   authorizedChatIds: splitCsv(process.env.AUTHORIZED_CHAT_IDS || ""),
 };
+
+const discordQueue = [];
+let discordQueueRunning = false;
+let discordNextSendAt = 0;
 
 const chains = JSON.parse(readFileSync(join(here, "chains.json"), "utf8"))
   .map((chain) => ({ ...chain, rpcUrl: process.env[chain.rpcEnv] || "" }))
@@ -305,19 +311,76 @@ async function sendDiscordMessage(text) {
   const discordText = telegramHtmlToDiscord(text, chain);
   const chunks = chunkText(discordText, 1900);
   for (const chunk of chunks) {
+    enqueueDiscordMessage(chunk);
+  }
+}
+
+function enqueueDiscordMessage(content) {
+  if (discordQueue.length >= config.discordMaxQueueSize) {
+    discordQueue.shift();
+    console.error("[discord] queue full; dropped oldest message");
+  }
+  discordQueue.push(content);
+  void drainDiscordQueue();
+}
+
+async function drainDiscordQueue() {
+  if (discordQueueRunning) return;
+  discordQueueRunning = true;
+
+  while (discordQueue.length > 0) {
+    const waitMs = Math.max(0, discordNextSendAt - Date.now());
+    if (waitMs > 0) await delay(waitMs);
+
+    const content = discordQueue[0];
+    const result = await postDiscordChunk(content);
+
+    if (result.ok) {
+      discordQueue.shift();
+      discordNextSendAt = Date.now() + config.discordMinSendIntervalMs;
+      continue;
+    }
+
+    if (result.retryAfterMs > 0) {
+      discordNextSendAt = Date.now() + result.retryAfterMs;
+      console.error(`[discord] rate limited; retrying in ${Math.ceil(result.retryAfterMs)}ms`);
+      continue;
+    }
+
+    discordQueue.shift();
+    console.error(`[discord] dropped message: ${result.error}`);
+  }
+
+  discordQueueRunning = false;
+}
+
+async function postDiscordChunk(content) {
+  try {
     const res = await fetch(config.discordWebhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         username: "Wallet Tracker",
-        content: chunk,
+        content,
         allowed_mentions: { parse: [] },
       }),
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`discord webhook ${res.status}: ${body || res.statusText}`);
+
+    if (res.ok) return { ok: true, retryAfterMs: 0, error: "" };
+
+    const body = await res.text().catch(() => "");
+    let retryAfterMs = 0;
+    if (res.status === 429) {
+      try {
+        const parsed = JSON.parse(body);
+        retryAfterMs = Math.ceil(Number(parsed.retry_after || 1) * 1000) + 250;
+      } catch {
+        retryAfterMs = Number.parseFloat(res.headers.get("retry-after") || "1") * 1000 + 250;
+      }
     }
+    return { ok: false, retryAfterMs, error: `webhook ${res.status}: ${body || res.statusText}` };
+  } catch (err) {
+    return { ok: false, retryAfterMs: 1000, error: err.message };
   }
 }
 
@@ -754,6 +817,9 @@ async function main() {
 
   console.log(`[boot] chains=${chains.map((chain) => chain.key).join(", ")}`);
   console.log(`[boot] telegram=${telegramEnabled ? "enabled" : "disabled"} discord=${config.discordWebhookUrl ? "enabled" : "disabled"}`);
+  if (config.discordWebhookUrl) {
+    console.log(`[boot] discordMinSendIntervalMs=${config.discordMinSendIntervalMs} discordMaxQueueSize=${config.discordMaxQueueSize}`);
+  }
   if (telegramEnabled) {
     console.log(`[boot] authorizedChats=${[...config.authorizedChatIds, ...state.authorizedChatIds].join(", ") || "first /start claims bot"}`);
   }
