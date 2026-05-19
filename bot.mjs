@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(here, "data.json");
+const SECURITY_PATH = join(here, "security.json");
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const ERC721_INTERFACE_ID = "0x80ac58cd";
 const ERC1155_TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7391d245d631d685e96f63564d0f17dbf7ef9d2a0bc415e3e";
@@ -45,6 +46,8 @@ const config = {
   minNativeOutgoingWei: parseDecimalUnits(process.env.MIN_NATIVE_OUTGOING_ALERT || "0", 18),
   discordMinSendIntervalMs: Number.parseInt(process.env.DISCORD_MIN_SEND_INTERVAL_MS || "1200", 10),
   discordMaxQueueSize: Number.parseInt(process.env.DISCORD_MAX_QUEUE_SIZE || "250", 10),
+  hideSuspiciousInbound: envBool("HIDE_SUSPICIOUS_INBOUND", true),
+  labelRiskyAssets: envBool("LABEL_RISKY_ASSETS", true),
   authorizedChatIds: splitCsv(process.env.AUTHORIZED_CHAT_IDS || ""),
 };
 
@@ -55,6 +58,7 @@ let discordNextSendAt = 0;
 const chains = JSON.parse(readFileSync(join(here, "chains.json"), "utf8"))
   .map((chain) => ({ ...chain, rpcUrl: process.env[chain.rpcEnv] || "" }))
   .filter((chain) => chain.rpcUrl);
+const security = loadSecurity();
 
 const state = loadState();
 
@@ -74,6 +78,35 @@ function loadEnv() {
 
 function splitCsv(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function envBool(name, fallback) {
+  const value = process.env[name];
+  if (value == null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+function loadSecurity() {
+  const defaults = { blockedAddresses: {}, blockedTokens: {}, trustedTokens: {}, trustedMarketplaces: {} };
+  if (!existsSync(SECURITY_PATH)) return defaults;
+  const loaded = JSON.parse(readFileSync(SECURITY_PATH, "utf8"));
+  return {
+    ...defaults,
+    ...loaded,
+    blockedAddresses: normalizeAddressLists(loaded.blockedAddresses || {}),
+    blockedTokens: normalizeAddressLists(loaded.blockedTokens || {}),
+    trustedTokens: normalizeAddressLists(loaded.trustedTokens || {}),
+    trustedMarketplaces: normalizeAddressLists(loaded.trustedMarketplaces || {}),
+  };
+}
+
+function normalizeAddressLists(lists) {
+  return Object.fromEntries(
+    Object.entries(lists).map(([chainKey, addresses]) => [
+      chainKey,
+      new Set((addresses || []).map((address) => address.toLowerCase())),
+    ]),
+  );
 }
 
 function loadState() {
@@ -204,6 +237,29 @@ function marketplaceName(chain, txTo) {
 
 function knownPaymentToken(chain, token) {
   return KNOWN_TOKENS[chain.key]?.[token.toLowerCase()];
+}
+
+function isBlockedAddress(chain, address) {
+  return Boolean(address && security.blockedAddresses[chain.key]?.has(address.toLowerCase()));
+}
+
+function isBlockedToken(chain, address) {
+  return Boolean(address && security.blockedTokens[chain.key]?.has(address.toLowerCase()));
+}
+
+function isTrustedToken(chain, address) {
+  const normalized = address?.toLowerCase();
+  return Boolean(normalized && (security.trustedTokens[chain.key]?.has(normalized) || knownPaymentToken(chain, normalized)));
+}
+
+function isTrustedMarketplace(chain, address) {
+  const normalized = address?.toLowerCase();
+  return Boolean(normalized && (security.trustedMarketplaces[chain.key]?.has(normalized) || marketplaceName(chain, normalized)));
+}
+
+function securityLabel(risk) {
+  if (!config.labelRiskyAssets || risk.reasons.length === 0) return "";
+  return `Risk: <b>${risk.level}</b> - ${html(risk.reasons.join(", "))}`;
 }
 
 function tokenCacheKey(chain, address) {
@@ -705,15 +761,20 @@ async function formatTransactionAlert(chain, tx, receipt, wallets) {
   const market = marketplaceName(chain, tx?.to) || inferMarketplace(chain, tx, allReceiptTransfers);
   const nftTransfers = transfers.filter((transfer) => transfer.kind === "erc721");
   const tokenTransfers = transfers.filter((transfer) => transfer.kind === "erc20");
+  const risk = assessTransactionRisk(chain, tx, transfers, market, tracked);
+  if (config.hideSuspiciousInbound && risk.suppress) return "";
+
   const trackedWalletLines = trackedWalletSummary(transfers, tracked);
   const paymentLines = await paymentSummary(chain, tokenTransfers, tracked);
   const nftLines = await nftSummary(chain, nftTransfers, tracked);
   const erc1155Line = erc1155Logs.length > 0 ? `NFT batch transfers: ${erc1155Logs.length}` : "";
+  const riskLine = securityLabel(risk);
 
   const title = titleForTransaction(chain, market, nftTransfers, tokenTransfers, tracked);
   const lines = [
     `<b>${html(title)}</b>`,
     trackedWalletLines,
+    riskLine,
     market ? `Venue: <b>${html(market)}</b>` : "",
     nftLines,
     erc1155Line,
@@ -730,6 +791,32 @@ function inferMarketplace(chain, tx, transfers) {
   const hasPayment = transfers.some((transfer) => transfer.kind === "erc20" && knownPaymentToken(chain, transfer.token));
   if (hasNft && hasPayment) return "NFT marketplace";
   return marketplaceName(chain, tx?.to);
+}
+
+function assessTransactionRisk(chain, tx, transfers, market, tracked) {
+  const reasons = [];
+  const blocked = transfers.filter((transfer) =>
+    isBlockedToken(chain, transfer.token) || isBlockedAddress(chain, transfer.from) || isBlockedAddress(chain, transfer.to),
+  );
+  const inbound = transfers.filter((transfer) => isTracked(transfer.to, tracked) && !isTracked(transfer.from, tracked));
+  const outbound = transfers.filter((transfer) => isTracked(transfer.from, tracked));
+  const inboundNfts = inbound.filter((transfer) => transfer.kind !== "erc20");
+  const inboundUnknownTokens = inbound.filter((transfer) => !isTrustedToken(chain, transfer.token));
+  const hasTrustedVenue = Boolean(market) || isTrustedMarketplace(chain, tx?.to);
+
+  if (blocked.length > 0) reasons.push("blocked address/token");
+  if (inboundNfts.length > 0 && outbound.length === 0 && !hasTrustedVenue) reasons.push("unsolicited inbound NFT");
+  if (inboundUnknownTokens.length > 0 && outbound.length === 0 && !hasTrustedVenue) reasons.push("unknown inbound token");
+  if (tx?.input && tx.input !== "0x" && isTracked(tx.from?.toLowerCase(), tracked) && !hasTrustedVenue && !market) {
+    reasons.push("tracked wallet interacted with untrusted contract");
+  }
+
+  const high = blocked.length > 0 || (inboundNfts.length > 0 && outbound.length === 0 && !hasTrustedVenue);
+  return {
+    level: high ? "high" : reasons.length > 0 ? "medium" : "low",
+    reasons,
+    suppress: high && inbound.length > 0 && outbound.length === 0,
+  };
 }
 
 function titleForTransaction(chain, market, nftTransfers, tokenTransfers, tracked) {

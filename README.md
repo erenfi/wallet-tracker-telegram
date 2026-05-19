@@ -74,6 +74,25 @@ DISCORD_MAX_QUEUE_SIZE=250
 If Discord returns `429`, the bot honors `retry_after` and retries instead of
 dropping the alert immediately.
 
+## Scam And Spam Filters
+
+The bot loads `security.json` for local blocklists and allowlists:
+
+- `blockedAddresses`: suppress or label interactions with known scam addresses
+- `blockedTokens`: suppress or label fake token/NFT contracts
+- `trustedTokens`: tokens allowed without an unknown-token warning
+- `trustedMarketplaces`: marketplaces allowed without an untrusted-contract warning
+
+Default behavior:
+
+```env
+HIDE_SUSPICIOUS_INBOUND=true
+LABEL_RISKY_ASSETS=true
+```
+
+This suppresses obvious unsolicited inbound NFTs/unknown tokens and adds a
+`Risk:` line for suspicious transactions that still need to be shown.
+
 ## Run In Background
 
 ```bash

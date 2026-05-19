@@ -1,0 +1,33 @@
+{
+  "blockedAddresses": {
+    "ethereum": [],
+    "base": []
+  },
+  "blockedTokens": {
+    "ethereum": [],
+    "base": []
+  },
+  "trustedTokens": {
+    "ethereum": [
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    ],
+    "base": [
+      "0x4200000000000000000000000000000000000006",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    ]
+  },
+  "trustedMarketplaces": {
+    "ethereum": [
+      "0x0000000000000068f116a894984e2db1123eb395",
+      "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",
+      "0x00000000000001ad428e4906ae43d8f9852d0dd6",
+      "0x00000000006c3852cbef3e08e8df289169ede581",
+      "0x7be8076f4ea4a4ad08075c2508e481d6c946d12b"
+    ],
+    "base": [
+      "0x0000000000000068f116a894984e2db1123eb395",
+      "0x00000000000000adc04c56bf30ac9d3c0aaf14dc"
+    ]
+  }
+}
