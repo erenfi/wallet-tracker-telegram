@@ -54,6 +54,7 @@ const config = {
 const discordQueue = [];
 let discordQueueRunning = false;
 let discordNextSendAt = 0;
+const pendingNativeAlerts = new Map();
 
 const chains = JSON.parse(readFileSync(join(here, "chains.json"), "utf8"))
   .map((chain) => ({ ...chain, rpcUrl: process.env[chain.rpcEnv] || "" }))
@@ -276,6 +277,12 @@ function isTracked(address, tracked) {
 
 function trackedLabel(address, tracked) {
   return tracked.get(address?.toLowerCase())?.label || short(address);
+}
+
+function marketDisplayName(market) {
+  if (!market) return "";
+  if (market.includes("OpenSea")) return "OpenSea";
+  return market;
 }
 
 async function rpc(chain, method, params) {
@@ -675,19 +682,46 @@ async function scanNativeTransfers(chain, blockNum, wallets) {
     if (direction === "Received" && value < config.minNativeIncomingWei) continue;
     if (direction === "Sent" && value < config.minNativeOutgoingWei) continue;
 
-    state.seen.push(key);
-    saveState();
-
     const trackedAddress = tracked.has(from) ? from : to;
-    await broadcast(
+    const message =
       `<b>${html(chain.name)} ${direction} ${html(chain.nativeSymbol)}</b>\n` +
         `${html(labelsFor(chain.key, trackedAddress).join(", "))} <code>${trackedAddress}</code>\n` +
         `Amount: <b>${formatWei(tx.value)} ${html(chain.nativeSymbol)}</b>\n` +
         `From: <a href="${chain.explorerAddress}${from}">${short(from)}</a>\n` +
         `To: <a href="${chain.explorerAddress}${to}">${short(to)}</a>\n` +
-        `Tx: <a href="${chain.explorerTx}${tx.hash}">${short(tx.hash, 10, 8)}</a>`,
-    );
+        `Tx: <a href="${chain.explorerTx}${tx.hash}">${short(tx.hash, 10, 8)}</a>`;
+
+    if (direction === "Sent" && (marketplaceName(chain, to) || isTrustedMarketplace(chain, to))) {
+      queueNativeAlert(chain, tx.hash, message);
+    } else {
+      state.seen.push(key);
+      saveState();
+      await broadcast(message);
+    }
   }
+}
+
+function queueNativeAlert(chain, txHash, message) {
+  const key = `${chain.key}:native:${txHash}`;
+  clearTimeout(pendingNativeAlerts.get(key)?.timer);
+  const timer = setTimeout(async () => {
+    const pending = pendingNativeAlerts.get(key);
+    if (!pending || state.seen.includes(key) || state.seen.includes(`${chain.key}:tx:${txHash}`)) return;
+    pendingNativeAlerts.delete(key);
+    state.seen.push(key);
+    saveState();
+    await broadcast(pending.message);
+  }, 15000);
+  pendingNativeAlerts.set(key, { message, timer });
+}
+
+function cancelNativeAlert(chain, txHash) {
+  const key = `${chain.key}:native:${txHash}`;
+  const pending = pendingNativeAlerts.get(key);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingNativeAlerts.delete(key);
+  state.seen.push(key);
 }
 
 async function scanTransferLogs(chain, fromBlock, toBlock, wallets) {
@@ -764,22 +798,26 @@ async function formatTransactionAlert(chain, tx, receipt, wallets) {
   const risk = assessTransactionRisk(chain, tx, transfers, market, tracked);
   if (config.hideSuspiciousInbound && risk.suppress) return "";
 
+  cancelNativeAlert(chain, receipt.transactionHash);
+
   const trackedWalletLines = trackedWalletSummary(transfers, tracked);
+  const summaryLine = await marketplaceSummary(chain, tx, market, nftTransfers, tokenTransfers, tracked);
   const paymentLines = await paymentSummary(chain, tokenTransfers, tracked);
-  const nftLines = await nftSummary(chain, nftTransfers, tracked);
+  const nftLines = summaryLine ? "" : await nftSummary(chain, nftTransfers, tracked);
   const erc1155Line = erc1155Logs.length > 0 ? `NFT batch transfers: ${erc1155Logs.length}` : "";
   const riskLine = securityLabel(risk);
 
-  const title = titleForTransaction(chain, market, nftTransfers, tokenTransfers, tracked);
+  const title = titleForTransaction(chain, tx, market, nftTransfers, tokenTransfers, tracked);
   const lines = [
     `<b>${html(title)}</b>`,
     trackedWalletLines,
     riskLine,
+    summaryLine,
     market ? `Venue: <b>${html(market)}</b>` : "",
     nftLines,
     erc1155Line,
     paymentLines,
-    tx?.to ? `Contract: <a href="${chain.explorerAddress}${tx.to}">${short(tx.to)}</a>` : "",
+    tx?.to ? `${market ? "Marketplace contract" : "Contract"}: <a href="${chain.explorerAddress}${tx.to}">${short(tx.to)}</a>` : "",
     `Tx: <a href="${chain.explorerTx}${receipt.transactionHash}">${short(receipt.transactionHash, 10, 8)}</a>`,
   ].filter(Boolean);
 
@@ -819,14 +857,56 @@ function assessTransactionRisk(chain, tx, transfers, market, tracked) {
   };
 }
 
-function titleForTransaction(chain, market, nftTransfers, tokenTransfers, tracked) {
+function nativePayment(chain, tx, tracked) {
+  const value = BigInt(tx?.value || "0x0");
+  if (value === 0n) return null;
+  const fromTracked = isTracked(tx.from?.toLowerCase(), tracked);
+  const toTracked = isTracked(tx.to?.toLowerCase(), tracked);
+  if (!fromTracked && !toTracked) return null;
+  return {
+    direction: fromTracked ? "sent" : "received",
+    amount: `${formatWei(tx.value)} ${chain.nativeSymbol}`,
+    value,
+  };
+}
+
+async function marketplaceSummary(chain, tx, market, nftTransfers, tokenTransfers, tracked) {
+  if (!market || nftTransfers.length === 0) return "";
+  const native = nativePayment(chain, tx, tracked);
+  const sentPayments = tokenTransfers.filter((transfer) => isTracked(transfer.from, tracked) && knownPaymentToken(chain, transfer.token));
+  const receivedPayments = tokenTransfers.filter((transfer) => isTracked(transfer.to, tracked) && knownPaymentToken(chain, transfer.token));
+  const receivedNfts = nftTransfers.filter((transfer) => isTracked(transfer.to, tracked));
+  const sentNfts = nftTransfers.filter((transfer) => isTracked(transfer.from, tracked));
+  const nft = receivedNfts[0] || sentNfts[0] || nftTransfers[0];
+  const meta = await tokenMeta(chain, nft.token, "erc721");
+  const item = `${html(meta.name || meta.symbol)} #${nft.value.toString()}`;
+  const venue = html(marketDisplayName(market));
+
+  if (receivedNfts.length > 0 && native?.direction === "sent") {
+    return `Purchased NFT: <b>${item}</b> for <b>${html(native.amount)}</b> on ${venue}`;
+  }
+  if (receivedNfts.length > 0 && sentPayments.length > 0) {
+    const payment = sentPayments[0];
+    const paymentMeta = await tokenMeta(chain, payment.token, "erc20");
+    return `Purchased NFT: <b>${item}</b> for <b>${html(formatTokenAmount(payment.value, paymentMeta))}</b> on ${venue}`;
+  }
+  if (sentNfts.length > 0 && receivedPayments.length > 0) {
+    const payment = receivedPayments[0];
+    const paymentMeta = await tokenMeta(chain, payment.token, "erc20");
+    return `Sold NFT: <b>${item}</b> for <b>${html(formatTokenAmount(payment.value, paymentMeta))}</b> on ${venue}`;
+  }
+  return `${receivedNfts.length > 0 ? "Received" : "Sent"} NFT: <b>${item}</b> on ${venue}`;
+}
+
+function titleForTransaction(chain, tx, market, nftTransfers, tokenTransfers, tracked) {
   const sentNfts = nftTransfers.filter((transfer) => isTracked(transfer.from, tracked));
   const receivedNfts = nftTransfers.filter((transfer) => isTracked(transfer.to, tracked));
   const sentPayments = tokenTransfers.filter((transfer) => isTracked(transfer.from, tracked) && knownPaymentToken(chain, transfer.token));
   const receivedPayments = tokenTransfers.filter((transfer) => isTracked(transfer.to, tracked) && knownPaymentToken(chain, transfer.token));
+  const native = nativePayment(chain, tx, tracked);
 
   if (market && sentNfts.length > 0 && receivedPayments.length > 0) return `${chain.name} NFT sold`;
-  if (market && receivedNfts.length > 0 && sentPayments.length > 0) return `${chain.name} NFT bought`;
+  if (market && receivedNfts.length > 0 && (sentPayments.length > 0 || native?.direction === "sent")) return `${chain.name} NFT bought`;
   if (market && sentNfts.length > 0) return `${chain.name} NFT marketplace transfer`;
   if (market && receivedNfts.length > 0) return `${chain.name} NFT received via marketplace`;
   if (market && tokenTransfers.length > 0) return `${chain.name} marketplace payment/fee`;
