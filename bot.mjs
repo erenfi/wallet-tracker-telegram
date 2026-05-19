@@ -41,6 +41,8 @@ const config = {
   chainPollMs: Number.parseInt(process.env.CHAIN_POLL_MS || "12000", 10),
   maxBlocksPerPoll: Number.parseInt(process.env.MAX_BLOCKS_PER_POLL || "25", 10),
   confirmations: Number.parseInt(process.env.CONFIRMATIONS || "1", 10),
+  minNativeIncomingWei: parseDecimalUnits(process.env.MIN_NATIVE_INCOMING_ALERT || "0", 18),
+  minNativeOutgoingWei: parseDecimalUnits(process.env.MIN_NATIVE_OUTGOING_ALERT || "0", 18),
   authorizedChatIds: splitCsv(process.env.AUTHORIZED_CHAT_IDS || ""),
 };
 
@@ -124,6 +126,14 @@ function telegramHtmlToDiscord(text, chain = null) {
 
 function formatWei(hexValue) {
   return formatUnits(BigInt(hexValue || "0x0"), 18);
+}
+
+function parseDecimalUnits(value, decimals) {
+  const clean = String(value || "0").trim();
+  if (!/^\d+(\.\d+)?$/.test(clean)) return 0n;
+  const [whole, frac = ""] = clean.split(".");
+  const paddedFrac = frac.slice(0, decimals).padEnd(decimals, "0");
+  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(paddedFrac || "0");
 }
 
 function formatUnits(value, decimals) {
@@ -536,14 +546,19 @@ async function scanNativeTransfers(chain, blockNum, wallets) {
     const from = tx.from?.toLowerCase();
     const to = tx.to?.toLowerCase();
     if (!tracked.has(from) && !tracked.has(to)) continue;
-    if (BigInt(tx.value || "0x0") === 0n) continue;
+    const value = BigInt(tx.value || "0x0");
+    if (value === 0n) continue;
 
     const key = `${chain.key}:native:${tx.hash}`;
     if (state.seen.includes(key)) continue;
+
+    const direction = tracked.has(from) ? "Sent" : "Received";
+    if (direction === "Received" && value < config.minNativeIncomingWei) continue;
+    if (direction === "Sent" && value < config.minNativeOutgoingWei) continue;
+
     state.seen.push(key);
     saveState();
 
-    const direction = tracked.has(from) ? "Sent" : "Received";
     const trackedAddress = tracked.has(from) ? from : to;
     await broadcast(
       `<b>${html(chain.name)} ${direction} ${html(chain.nativeSymbol)}</b>\n` +

@@ -50,6 +50,18 @@ Examples:
 Use `0x` addresses. ENS resolution is intentionally left out of this
 no-dependency build.
 
+## Noise Filters
+
+Native ETH dust transfers can be suppressed without affecting NFT/token alerts:
+
+```env
+MIN_NATIVE_INCOMING_ALERT=0.001
+MIN_NATIVE_OUTGOING_ALERT=0
+```
+
+With that setting, inbound transfers below `0.001 ETH` are skipped, while
+outgoing ETH transfers and marketplace token/NFT alerts still post.
+
 ## Run In Background
 
 ```bash
