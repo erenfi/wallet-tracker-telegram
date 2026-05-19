@@ -1,0 +1,38 @@
+[
+  {
+    "key": "ethereum",
+    "name": "Ethereum",
+    "chainId": 1,
+    "rpcEnv": "ETHEREUM_RPC_URL",
+    "explorerTx": "https://etherscan.io/tx/",
+    "explorerAddress": "https://etherscan.io/address/",
+    "nativeSymbol": "ETH"
+  },
+  {
+    "key": "base",
+    "name": "Base",
+    "chainId": 8453,
+    "rpcEnv": "BASE_RPC_URL",
+    "explorerTx": "https://basescan.org/tx/",
+    "explorerAddress": "https://basescan.org/address/",
+    "nativeSymbol": "ETH"
+  },
+  {
+    "key": "arbitrum",
+    "name": "Arbitrum",
+    "chainId": 42161,
+    "rpcEnv": "ARBITRUM_RPC_URL",
+    "explorerTx": "https://arbiscan.io/tx/",
+    "explorerAddress": "https://arbiscan.io/address/",
+    "nativeSymbol": "ETH"
+  },
+  {
+    "key": "optimism",
+    "name": "Optimism",
+    "chainId": 10,
+    "rpcEnv": "OPTIMISM_RPC_URL",
+    "explorerTx": "https://optimistic.etherscan.io/tx/",
+    "explorerAddress": "https://optimistic.etherscan.io/address/",
+    "nativeSymbol": "ETH"
+  }
+]

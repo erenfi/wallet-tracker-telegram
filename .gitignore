@@ -1,0 +1,5 @@
+.env
+data.json
+*.log
+*.pid
+node_modules/
